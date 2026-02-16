@@ -1,1 +1,130 @@
+--CTE for collection metrics for an account
+with account_dataset as
+(
+select
+s.date,
+sp.country,
+aa.send_interval,
+aa.is_verified,
+aa.is_unsubscribed,
+count(distinct acs.account_id) as account_cnt
+from `DA.account` aa
+join `DA.account_session` acs
+on aa.id = acs.account_id
+join `DA.session` s
+on acs.ga_session_id = s.ga_session_id
+join `DA.session_params` sp
+on sp.ga_session_id = s.ga_session_id
+group by s.date, sp.country, aa.send_interval, aa.is_verified, aa.is_unsubscribed
+),
+--CTE for collection metrics for emails
+email_dataset as
+(
+select
+date_add(s.date, interval es.sent_date DAY) as date,
+sp.country,
+aa.send_interval,
+aa.is_verified,  
+aa.is_unsubscribed,
+count(distinct es.id_message) as sent_msg,
+count(distinct eo.id_message) as open_msg,
+count(distinct ev.id_message) as visit_msg
+from
+ 	`data-analytics-mate.DA.email_sent` es
+ 	left join `data-analytics-mate.DA.email_open` eo
+ 	on es.id_message = eo.id_message
+ 	left join `data-analytics-mate.DA.email_visit` ev
+ on es.id_message = ev.id_message
+ 	join `data-analytics-mate.DA.account_session` acs
+ 	on es.id_account = acs.account_id
+join `data-analytics-mate.DA.session_params` sp
+ 	on acs.ga_session_id = sp.ga_session_id
+ 	join `DA.session` s
+ 	on acs.ga_session_id = s.ga_session_id
+ 	join `DA.account` aa
+ 	on aa.id = es.id_account
+ 	group by date, sp.country, aa.send_interval, aa.is_verified, aa.is_unsubscribed
+),
+--СTE for merging data from previous datasets
+union_dataset as
+(
+select
+date,
+country,
+send_interval,
+is_verified,
+is_unsubscribed,
+account_cnt,
+0 as sent_msg,
+0 as open_msg,
+0 as visit_msg
+from account_dataset
+union all
+select
+date,
+country,
+send_interval,
+is_verified,
+is_unsubscribed,
+0 as account_cnt,
+sent_msg,
+open_msg,
+visit_msg,
+from email_dataset
+),
+– Final dataset without nulls
+union_final as
+(
+select
+date,
+country,
+send_interval,
+is_verified,
+is_unsubscribed,
+sum(account_cnt) as account_cnt,
+sum(sent_msg) as sent_msg,
+sum(open_msg) as open_msg,
+sum(visit_msg) as visit_msg
+from union_dataset
+group by date, country, send_interval, is_verified, is_unsubscribed
+)
+-- Final query with subqueries
+select *
+from
+(
+  -- Subquery for calculation rank of countries by amount of created subscribes and sent emails
+select
+date,
+country,
+send_interval,
+is_verified,
+is_unsubscribed,
+account_cnt,
+sent_msg,
+open_msg,
+visit_msg,
+total_country_sent_cnt,
+total_country_account_cnt,
+dense_rank() over (order by total_country_account_cnt desc) as rank_total_country_account_cnt,
+dense_rank() over (order by total_country_sent_cnt desc) as rank_total_country_sent_cnt
+from
+(
+  – Subquery for calculation count of created subscribes and sent emails by countries
+select
+date,
+country,
+send_interval,
+is_verified,
+is_unsubscribed,
+account_cnt,
+sum(account_cnt) over(partition by country) as total_country_account_cnt,
+sent_msg,
+open_msg,
+visit_msg,
+sum(sent_msg) over(partition by country) as total_country_sent_cnt
+from union_final
+))
 
+
+– Filtering dates
+where rank_total_country_account_cnt <= 10 or rank_total_country_sent_cnt <= 10
